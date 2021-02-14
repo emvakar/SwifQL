@@ -12,7 +12,7 @@ public protocol SwifQLable: CustomStringConvertible {
 }
 
 extension SwifQLable {
-    public var description: String { return prepare(.psql).plain }
+    public var description: String { prepare(.psql).plain }
 }
 
 public struct SwifQLableParts: SwifQLable {
@@ -26,271 +26,75 @@ public struct SwifQLableParts: SwifQLable {
 }
 
 public protocol SwifQLPart {}
-struct SwifQLPartBool: SwifQLPart, SwifQLable {
-    var parts: [SwifQLPart] {
-        return [self]
-    }
-    
-    let value: Bool
-    
-    init (_ value: Bool) {
-        self.value = value
-    }
-}
-public struct SwifQLPartTable: SwifQLPart {
-    public var table: String
-    public init (_ table: String) {
-        self.table = table
-    }
-}
-public struct SwifQLPartTableWithAlias: SwifQLPart {
-    public var table: String
-    public var alias: String
-    public init (_ table: String, _ alias: String) {
-        self.table = table
-        self.alias = alias
-    }
-}
+
 public protocol SwifQLKeyPathable: SwifQLPart {
-    var table: String { get }
+    var schema: String? { get }
+    var table: String? { get }
     var paths: [String] { get }
-}
-public struct SwifQLPartKeyPathLastPart: SwifQLPart {
-    public var lastPath: String
-    public init (_ lastPath: String) {
-        self.lastPath = lastPath
-    }
-}
-public struct SwifQLPartKeyPath: SwifQLKeyPathable {
-    public var table: String
-    public var paths: [String]
-    public init (table: String, paths: String...) {
-        self.init(table: table, paths: paths)
-    }
-    public init (table: String, paths: [String]) {
-        self.table = table
-        self.paths = paths
-    }
-}
-extension SwifQLPartKeyPath: SwifQLable{
-    public var parts: [SwifQLPart] {
-        return SwifQLableParts(parts: self).parts
-    }
-}
-public struct SwifQLPartAlias: SwifQLPart {
-    var alias: String
-    init (_ alias: String) {
-        self.alias = alias
-    }
-}
-public struct SwifQLPartOperator: SwifQLPart {
-    var value: String
-    public init (_ value: String) { self.value = value }
-}
-public struct SwifQLPartUnsafeValue: SwifQLPart {
-    var unsafeValue: Encodable
-    public init (_ value: Encodable) { unsafeValue = value }
-}
-public struct SwifQLPartSafeValue: SwifQLPart {
-    var safeValue: Any
-    public init (_ value: Any) { safeValue = value }
-}
-
-public enum SQLDialect {
-    case mysql, psql
-}
-
-public struct SwifQLSplittedQuery {
-    public var query: String
-    public var values: [Encodable]
-    init (query: String, values: [Encodable]) {
-        self.query = query
-        self.values = values
-    }
-}
-
-public struct SwifQLPrepared {
-    private var query: String
-    private var values: [Encodable]
-    private var formattedValues: [String]
-    init (query: String, values: [Encodable], formattedValues: [String]) {
-        self.query = query
-        self.values = values
-        self.formattedValues = formattedValues
-    }
-    
-    public var plain: String {
-        var s = query
-        guard values.count > 0 else { return s }
-        var i = 0
-        while let r = s.range(of: FQP.key) {
-            s.replaceSubrange(r, with: formattedValues[i])
-            i = i + 1
-        }
-        return s
-    }
-    
-    public var splitted: SwifQLSplittedQuery {
-        var s = query
-        if values.count > 0 {
-            var i = 1
-            while let r = s.range(of: FQP.key) {
-                s.replaceSubrange(r, with: FQP.fKey(i))
-                i = i + 1
-            }
-        }
-        return SwifQLSplittedQuery(query: s, values: values)
-    }
 }
 
 extension SwifQLable {
+    /// Good choice only for super short and universal queries like `BEGIN;`, `ROLLBACK;`, `COMMIT;`
+    public func prepare() -> SwifQLPrepared {
+        prepare(.any)
+    }
+    
     public func prepare(_ dialect: SQLDialect) -> SwifQLPrepared {
         var values: [Encodable] = []
         var formattedValues: [String] = []
         let query = parts.map { part in
             switch part {
+            case let v as SwifQLPartArray:
+                guard v.elements.count > 0 else {
+                    return dialect.emptyArrayStart + dialect.emptyArrayEnd
+                }
+                var string = dialect.arrayStart
+                v.elements.enumerated().forEach { i, v in
+                    if i > 0 {
+                        string += dialect.arraySeparator
+                    }
+                    let prepared = v.prepare(dialect)
+                    values.append(contentsOf: prepared._values)
+                    formattedValues.append(contentsOf: prepared._formattedValues)
+                    string += prepared._query
+                }
+                return string + dialect.arrayEnd
             case let v as SwifQLPartBool:
-                return v.value == true ? "TRUE" : "FALSE"
+                return dialect.boolValue(v.value)
+            case is SwifQLPartNull:
+                return dialect.null
+            case let v as SwifQLPartSchema:
+                guard let schema = v.schema else { return "" }
+                return dialect.schemaName(schema)
             case let v as SwifQLPartTable:
-                switch dialect {
-                case .mysql: return v.table
-                case .psql: return v.table.doubleQuotted
+                if let schema = v.schema {
+                    return dialect.schemaName(schema) + "." + dialect.tableName(v.table)
                 }
+                return dialect.tableName(v.table)
             case let v as SwifQLPartTableWithAlias:
-                switch dialect {
-                case .mysql: return v.table + " AS " + v.alias
-                case .psql: return v.table.doubleQuotted + " AS " + v.alias.doubleQuotted
+                if let schema = v.schema {
+                    return dialect.schemaName(schema) + "." + dialect.tableName(v.table, andAlias: v.alias)
                 }
+                return dialect.tableName(v.table, andAlias: v.alias)
             case let v as SwifQLPartAlias:
-                switch dialect {
-                case .mysql: return v.alias
-                case .psql: return v.alias.doubleQuotted
-                }
+                return dialect.alias(v.alias)
             case let v as SwifQLPartKeyPath:
-                return format(keyPath: v, for: dialect)
-            case let v as SwifQLPartKeyPathLastPart:
-                return format(keyPathLastPart: v.lastPath, for: dialect)
+                return dialect.keyPath(v)
+            case let v as SwifQLPartColumn:
+                return dialect.column(v.name)
             case let v as SwifQLPartOperator:
-                return v.value
+                return v._value
+            case let v as SwifQLPartDate:
+                return dialect.date(v.date)
             case let v as SwifQLPartSafeValue:
-                return formatSafeValue(v.safeValue, for: dialect)
+                return dialect.safeValue(v.safeValue)
             case let v as SwifQLPartUnsafeValue:
                 values.append(v.unsafeValue)
-                formattedValues.append(formatSafeValue(v.unsafeValue, for: dialect))
-                return FQP.key
+                formattedValues.append(dialect.safeValue(v.unsafeValue))
+                return dialect.bindSymbol
             default: return ""
             }
         }.joined(separator: "")
-        return SwifQLPrepared(query: query, values: values, formattedValues: formattedValues)
+        return .init(dialect: dialect, query: query, values: values, formattedValues: formattedValues)
     }
-    
-    func format(keyPath: SwifQLPartKeyPath, for dialect: SQLDialect) -> String {
-        var result = ""
-        switch dialect {
-        case .mysql:
-            result.append(keyPath.table)
-            result.append(".")
-            if let lastPath = keyPath.paths.last {
-                result.append(lastPath)
-            }
-        case .psql:
-            result.append(keyPath.table.doubleQuotted)
-            for (i, v) in keyPath.paths.enumerated() {
-                if i == 0 {
-                    result.append(".")
-                    result.append(v.doubleQuotted)
-                } else {
-                    result.append("->")
-                    result.append(v.singleQuotted)
-                }
-            }
-        }
-        return result
-    }
-    
-    func format(keyPathLastPart lastPath: String, for dialect: SQLDialect) -> String {
-        var result = ""
-        switch dialect {
-        case .mysql:
-            result.append(lastPath)
-        case .psql:
-            result.append(lastPath.doubleQuotted)
-        }
-        return result
-    }
-    
-    func formatSafeValue(_ value: Any, for dialect: SQLDialect) -> String {
-        switch value {
-        case let v as String: return format(v, for: dialect)
-        case let v as UUID: return format(v.uuidString, for: dialect)
-        case let v as Bool: return v ? "TRUE" : "FALSE"
-        case let v as UInt: return String(describing: v)
-        case let v as UInt8: return String(describing: v)
-        case let v as UInt16: return String(describing: v)
-        case let v as UInt32: return String(describing: v)
-        case let v as UInt64: return String(describing: v)
-        case let v as Int: return String(describing: v)
-        case let v as Int8: return String(describing: v)
-        case let v as Int16: return String(describing: v)
-        case let v as Int32: return String(describing: v)
-        case let v as Int64: return String(describing: v)
-        case let v as Float: return String(describing: v)
-        case let v as Double: return String(describing: v)
-        case let v as Decimal: return String(describing: v)
-        default: return format(String(describing: value), for: dialect)
-        }
-    }
-    
-    func format(_ v: String, for dialect: SQLDialect) -> String {
-        switch dialect {
-        case .mysql: return v.singleQuotted
-        case .psql: return v.singleQuotted
-        }
-    }
-    
-//    public var `as`: SwifQLable {
-//        return FQP(queryString + " AS ", values: values)
-//    }
-//    
-//    public func `as`(_ what: String) -> SwifQLable {
-//        return FQP(queryString + " AS " + what.doubleQuotted, values: values)
-//    }
-//    
-//    public func o(_ operator: String) -> SwifQLable {
-//        return FQP(queryString + " " + `operator` + " ", values: values)
-//    }
-//    
-//    public var factorial: SwifQLable {
-//        return FQP(queryString + " ! ", values: values)
-//    }
-//    
-//    public var comma: SwifQLable {
-//        return FQP(queryString + ", ", values: values)
-//    }
-//    
-//    public func field(_ field: SwifQLable) -> SwifQLable {
-//        return FQP(queryString + field.queryString, values: [values, field.values].concat())
-//    }
-//    
-    
-//
-//    public var Insert: SwifQLable { return FQP(queryString + " INSERT ", values: values) }
-//    public var Into: SwifQLable { return FQP(queryString + " INTO ", values: values) }
-//    
-
 }
-
-//extension SwifQLable {
-//    public subscript (_ wrappedParts: SwifQLable...) -> SwifQLable {
-//        var parts = self.parts
-//        parts.appendSpaceIfNeeded()
-//        for (i, v) in wrappedParts.enumerated() {
-//            if i > 0 {
-//                parts.append(o: .space)
-//                parts.append(o: .comma)
-//            }
-//            parts.append(contentsOf: v.parts)
-//        }
-//        return SwifQLableParts(parts: parts)
-//    }
-//}

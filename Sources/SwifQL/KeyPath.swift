@@ -7,20 +7,24 @@
 
 import Foundation
 
-public protocol FQKeyPath: Decodable {}
+public protocol KeyPathLastPath {
+    var lastPath: String { get }
+}
 
-public protocol FQUniversalKeyPathSimple {
-    var queryValue: String { get }
+extension String: KeyPathLastPath {
+    public var lastPath: String { self }
+}
+
+public protocol SwifQLUniversalKeyPathSimple: KeyPathLastPath {
     var path: String { get }
     var lastPath: String { get }
 }
 
-public protocol FQUniversalKeyPath {
+public protocol SwifQLUniversalKeyPath {
     associatedtype AType
     associatedtype AModel: Decodable
     associatedtype ARoot
     
-    var queryValue: String { get }
     var path: String { get }
     var lastPath: String { get }
     var originalKeyPath: KeyPath<AModel, AType> { get }
@@ -30,10 +34,10 @@ public protocol FQUniversalKeyPath {
 
 infix operator => : AdditionPrecedence
 /// e.g. `"1"::.text`
-public func => (lhs: SwifQLable, rhs: Fn.CastTypes) -> SwifQLable {
+public func => (lhs: SwifQLable, rhs: Type) -> SwifQLable {
     var parts: [SwifQLPart] = lhs.parts
     parts.append(o: .custom("::"))
-    parts.append(o: .custom(rhs.string))
+    parts.append(o: .custom(rhs.name))
     return SwifQLableParts(parts: parts)
 }
 /// e.g. `"hello" as "title"`
@@ -42,20 +46,31 @@ public func => (lhs: SwifQLable, rhs: SwifQLable) -> SwifQLable {
     parts.append(o: .space)
     parts.append(o: .as)
     parts.append(o: .space)
-    if let rhs = rhs as? FQUniversalKeyPathSimple {
+    if let rhs = rhs as? SwifQLUniversalKeyPathSimple {
         parts.append(SwifQLPartAlias(rhs.lastPath))
+    } else if let _ = rhs as? _AliasKeyPath {
+        parts.append(contentsOf: rhs.parts)
+    } else if let _ = rhs as? TableAlias {
+        parts.append(contentsOf: rhs.parts)
+    } else if let schemaWithTable = rhs as? Path.SchemaWithTable {
+        parts.append(SwifQLPartAlias(schemaWithTable.table))
+    } else if let table = rhs as? Path.Table {
+        parts.append(SwifQLPartAlias(table.name))
+    } else if let kp = rhs as? Keypathable {
+        parts.append(SwifQLPartAlias(kp.lastPath))
     } else {
         parts.append(SwifQLPartAlias(String(describing: rhs)))
     }
     return SwifQLableParts(parts: parts)
 }
 
-/// Getting keypath with alias
-/// e.g. you have `User` table with `email` field, and normally you can just write \User.email
-/// but in case of alias e.g. `let u = User.alias("u")` you should call it like `u+\.email`
-infix operator ~: AdditionPrecedence
-public func ~ <K, T, V>(lhs: FQAlias<T>, rhs: K) -> AliasedKeyPath<K, T, V> where K: KeyPath<T, V>, K: Keypathable, T: Decodable {
-    return AliasedKeyPath(lhs.alias, rhs)
+prefix operator =>
+/// write `=>"aliasName"` in Swift
+/// to reach `"aliasName"` in SQL
+public prefix func => (rhs: String) -> SwifQLable {
+    var parts: [SwifQLPart] = []
+    parts.append(SwifQLPartAlias(rhs))
+    return SwifQLableParts(parts: parts)
 }
 
 //MARK: - Basic arithmetic functions
@@ -264,23 +279,18 @@ postfix public func ||||||(rhs: SwifQLable) -> SwifQLable {
     return SwifQLableParts(parts: parts)
 }
 
+postfix operator *
+postfix public func *(lhs: SwifQLable) -> SwifQLable {
+    var parts = lhs.parts
+    parts.appendSpaceIfNeeded()
+    parts.append(o: .custom("*"))
+    return SwifQLableParts(parts: parts)
+}
+
 postfix operator .*
 postfix public func .*(lhs: SwifQLable) -> SwifQLable {
     var parts = lhs.parts
     parts.append(o: .custom(".*"))
     parts.append(o: .space)
     return SwifQLableParts(parts: parts)
-}
-
-extension SwifQLable {
-//    public func `_`(_ operator: Fn.SwifQLOperator) -> SwifQLable {
-//        var parts = self.parts
-//        parts.append(o: `operator`)
-//        return SwifQLableParts(parts: parts)
-//    }
-//    public func `_`(_ part: SwifQLable) -> SwifQLable {
-//        var parts = self.parts
-//        parts.append(contentsOf: part.parts)
-//        return SwifQLableParts(parts: parts)
-//    }
 }
